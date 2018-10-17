@@ -2,6 +2,30 @@
 
 # 20181012, joseph.tingiris@gmail.com
 
+# output the binary string representation of a valid integer and return true (0), or return nothing and false (0)
+function intToBin(){
+    local integer="$1"
+
+    if [[ $integer =~ ^[0-9]+$ ]]; then
+        local binary i
+
+        if [ $integer -eq 0 ]; then
+            local binary=0
+        else
+            for ((i=$integer; i>0; i>>=1)); do
+                local binary="$((i&1))$binary"
+            done
+        fi
+
+        if [ ${#binary} -gt 0 ]; then
+            printf "%s" "$binary"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
 # check if two ipv4 addresses 'confict' with each other
 function ipv4Conflict() {
     local first=$1
@@ -73,12 +97,12 @@ function ipv4Conflict() {
             for debug_prefix in address bits long mask confict; do
                 local debug_var=${debug_prefix}_${debug_postfix}
                 (>&2 printf "%-30s = %s\n" "${debug_var}" "${!debug_var}")
-                unset debug_var
+                unset -v debug_var
             done
-            unset debug_prefix
+            unset -v debug_prefix
             (>&2 printf "\n")
         done
-        unset debug_postfix
+        unset -v debug_postfix
     fi
 
     if [ $confict_first -eq $confict_second ]; then
@@ -100,16 +124,17 @@ function ipv4Bin() {
 }
 
 # output ipv4 decimal (dec) notation and return true (0), or output nothing and return false (1)
+# inputs binary, decimal, hexidecimal, or an integer
 function ipv4Dec() {
     local -l address=$1
 
     local max_bits=32
 
     #
-    # validate input
+    # validate input exists
     #
 
-    if [ "$address" == "" ]; then
+    if [ ${#address} -eq 0 ]; then
         return 1
     fi
 
@@ -118,29 +143,25 @@ function ipv4Dec() {
     #
 
     local decimal=1 # false
-    local decimal_address=""
-    local decimal_bits=""
-
     local decimal_address=$address
 
     # validate ipv4 decimal address
     if [[ $decimal_address =~ ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5]){1}(/|$) ]]; then
         local decimal=0 # true
-        local decimal_address=${decimal_address%%/*} # everything before /
+        local decimal_bits="" # empty
+
         if [[ "$decimal_address" == *"/"* ]]; then
+            # order is important; cut bits before address
             local decimal_bits=${decimal_address##*/} # everything after /
+            local decimal_address=${decimal_address%%/*} # everything before /
         fi
+
         if [[ $decimal_bits =~ ^[0-9]+$ ]]; then
             if [ $decimal_bits -ge 0 ] && [ $decimal_bits -le $max_bits ]; then
                 # append the bit mask back to the address
                 local decimal_address+="/${decimal_bits}"
             else
                 # what comes after / is a positive integer, but has more or less bits in the cidr than is valid; bad address
-                return 1
-            fi
-        else
-            if [ ${#decimal_bits} -gt 0 ]; then
-                # what comes after / is not a positive integer; bad address
                 return 1
             fi
         fi
@@ -158,14 +179,21 @@ function ipv4Dec() {
     #
 
     local binary=1 # false
-    local binary_address=""
-    local binary_bits=""
+    local binary_address=$address
 
-    if [[ $address =~ ^[0-1]+$ ]]; then
+    if [[ $address =~ ^[0-1]{32}$ ]]; then
+        local binary_bits="" # empty
+
         printf "binary $address"
-    fi
 
-    # TODO; complete
+        if [ $decimal -eq 0 ]; then
+            printf "$decimal_address"
+            return 0
+        fi
+
+        # TODO; complete
+        # 00000000000000000000000000000000
+    fi
 
     # $address not in a valid binary format
 
@@ -174,22 +202,55 @@ function ipv4Dec() {
     #
 
     local hexidecimal=1 # false
-    local hexidecimal_address=""
-    local hexidecimal_bits=""
+    local hexidecimal_address=$address
 
-    # if they exist then strip 0x (first 2 characters)
-    if [[ ${address} =~ ^0[Xx] ]]; then
-        local hexidecimal_address=${address:2:${#address}-2}
-        local hexidecimal=1 # true
-    else
-        local hexidecimal_address=${address}
-    fi
-
-
-    if [[ ${hexidecimal_address:0:8} =~ ^(([0-9a-FA-F]{8})(/|$)) ]]; then
+    if [[ ${hexidecimal_address} =~ ^((^0[Xx]{1}[0-9a-fA-F]{8}|[0-9a-fA-F]{8})(/|$)) ]]; then
         local hexidecimal=0 # true
+        local hexidecimal_bits="" # empty
+
+        if [[ "$hexidecimal_address" == *"/"* ]]; then
+            # order is important; cut bits before address
+            local hexidecimal_bits=${hexidecimal_address##*/} # everything after /
+            local hexidecimal_address=${hexidecimal_address%%/*} # everything before /
+        fi
+
+        # these are unique to hexidecimal; support if the input is prefixed with 0x (strip first 2 characters)
+
+        if [[ ${hexidecimal_address} =~ ^0[Xx] ]]; then
+            local hexidecimal_address=${hexidecimal_address:2:${#hexidecimal_address}-2}
+        fi
+
         local hexidecimal_address="0x${hexidecimal_address:0:2} 0x${hexidecimal_address:2:2} 0x${hexidecimal_address:4:2} 0x${hexidecimal_address:6:2}"
-            echo "hexidecimal_address=$hexidecimal_address"
+        printf -v hexidecimal_address "%d.%d.%d.%d" $hexidecimal_address # convert address from hexidecimal to decimal
+
+        # re-validate decimal address?? shouldn't be necessary ...
+
+        if [[ ${hexidecimal_bits} =~ ^((^0[Xx]{1}[0-9a-fA-F]{8}|[0-9a-fA-F]{8})($)) ]]; then
+            # bits as hex
+
+            if [[ ${hexidecimal_bits} =~ ^0[Xx] ]]; then
+                local hexidecimal_bits=${hexidecimal_bits:2:${#hexidecimal_bits}-2}
+            fi
+
+            if hexidecimal_bits=$(ipv4Mask $hexidecimal_bits); then
+                local hexidecimal_address+="/${hexidecimal_bits}"
+            else
+                return 1 # invalid mask
+            fi
+
+        else
+            # bits as an integer?
+            if [[ $hexidecimal_bits =~ ^[0-9]+$ ]]; then
+                if [ $hexidecimal_bits -ge 0 ] && [ $hexidecimal_bits -le $max_bits ]; then
+                    # append the bit mask back to the address
+                    local hexidecimal_address+="/${hexidecimal_bits}"
+                else
+                    # what comes after / is a positive integer, but has more or less bits in the cidr than is valid; bad address
+                    return 1
+                fi
+            fi
+        fi
+
     fi
 
     if [ $hexidecimal -eq 0 ]; then
@@ -199,7 +260,7 @@ function ipv4Dec() {
     fi
 
     if [ $hexidecimal -eq 0 ]; then
-        printf "%d.%d.%d.%d" $hexidecimal_address
+        printf $hexidecimal_address
         return 0
     fi
 
@@ -226,6 +287,71 @@ function ipv4Int() {
     printf "address=$address\n"
 }
 
+# convert decimal mask to bits and vice versa
+function ipv4Mask() {
+    local bits mask max_bits=32
+
+    if mask=$(ipv4Dec $1); then # this will validate dec & convert bin/hex/int as needed
+        # convert from decimal mask to cidr bits
+
+        local bits=0
+
+        # avoid subshell
+        local octal_mask
+        printf -v octal_mask '%o' ${mask//\./\ }
+        local octal_mask=0${octal_mask} # must have leading zero
+
+        while [ $octal_mask -gt 0 ]; do
+            # calculate octal_mask modulo 2 & right shift 1 position; add the result to decimal bits
+            let local bits+=$((octal_mask%2)) 'octal_mask>>=1'
+        done
+
+        if [ $bits -ge 0 ] && [ $bits -le $max_bits ]; then
+            printf "%d" $bits
+            return 0
+        else
+            return 1 # invalid number of bits
+        fi
+
+    else
+        # convert from cidr bits to decimal subnet mask
+
+        local mask=""
+
+        local bits=$1
+
+        if [[ $bits =~ ^[0-9]+$ ]]; then
+            if [ $bits -ge 0 ] && [ $bits -le $max_bits ]; then
+                local octet=0
+                local octet_div=$(($bits/8)) # divide how many bits are full bytes, 0xFF, 255, etc.
+                local octet_mod=$(($bits%8)) # modulo 8 how many bits are *not* full bytes, 0xFF, 255, etc.
+
+                for ((octet=0;octet<4;octet+=1)); do
+                    if [ $octet -lt $octet_div ]; then
+                        mask+=255 # full byte octet
+                    elif [ $octet -eq $octet_div ]; then
+                        mask+=$((256-2**(8-$octet_mod))) # calculate the decimal version of the octet
+                    else
+                        mask+=0
+                    fi
+
+                    if [ $octet -lt 3 ]; then
+                        mask+=. # append a period
+                    fi
+                done
+
+                printf "%s" $mask
+                return 0
+
+            else
+                return 1 # invalid number of bits
+            fi
+        else
+            return 1 # invalid, bits is not a positive integer
+        fi
+
+    fi
+}
 
 function ipv42Long() {
     local address=$1
@@ -245,7 +371,7 @@ function ipv42Long() {
 
     printf '%d' "$((a+b+c+d))"
 
-    unset a b c d
+    unset -v a b c d
 
     return 0
 }
@@ -294,12 +420,6 @@ function ipv4Valid() {
     return 1 # invalid ipv4 address
 }
 
-if [ "$0" == "$BASH_SOURCE" ]; then
-    exit
-else
-    return
-fi
-
 # 
 # tests; TODO remove
 #
@@ -316,11 +436,26 @@ echo "(dec) ipv4_dec=$ipv4_dec"
 ipv4_dec=$(ipv4Dec 0xffff)
 echo "(hex) ipv4_dec=$ipv4_dec"
 
-ipv4_dec=$(ipv4Dec 0x006416AC)
+ipv4_dec=$(ipv4Dec 0x506416AC)
 echo "(hex) ipv4_dec=$ipv4_dec"
 
 ipv4_dec=$(ipv4Dec ffffffff/24)
 echo "(hex) ipv4_dec=$ipv4_dec"
+
+ipv4_dec=$(ipv4Dec ffffffff/0xFFF80000)
+echo "(hex) ipv4_dec=$ipv4_dec"
+
+echo "hexidecimal_bits=$hexidecimal_bits"
+
+echo $(ipv4Mask 25)
+echo $(ipv4Mask 255.224.0.0)
+
+
+if [ "$0" == "$BASH_SOURCE" ]; then
+    exit
+else
+    return
+fi
 
 printf "%d" "0xC0"
 
@@ -365,12 +500,12 @@ if [ "$Debug" != "" ]; then
                 (>&2 printf "$confict_first does NOT confict with $confict_second\n")
             fi
 
-            unset confict_second
+            unset -v confict_second
         done
 
         (>&2 printf "\n")
 
-        unset confict_first
+        unset -v confict_first
     done
 fi
 
