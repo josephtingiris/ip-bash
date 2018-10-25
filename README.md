@@ -2,11 +2,12 @@
 
 ### Purpose
 
-A bash source script that provides various functions for validating & manipulating IP addresses such as validating an IP address, checking if two addresses 'conflict' or 'overlap' with each other, compressing and expanding addresses, converting to/from bin/dec/hex/int, etc.
+A bash source script that provides various functions for manipulating IP addresses such as validating an address and/or bits, checking if two addresses 'conflict' or 'overlap' with each other, compressing and expanding addresses, converting to/from binary/decimal/hexidecomal/octal/integer, etc.
 
 Objectives
 
-* Provide native bash functions for working with TCP/IP v4 & v6 addresses.
+* Provide bash functions for working with TCP/IP v4 & v6 addresses.
+* Use bash builtins.  No external depdendencies.  No pipes.
 
 ### License
 
