@@ -27,28 +27,26 @@ readonly IPV6_MAX_LONG=$((2**$IPV6_MAX_BITS-1)) # grr; bash max is sint64
 #############
 
 #
-# output the binary string representation of a valid integer or hexidecimal value and return true, or return nothing and false
+# input an integer or hexidecimal value
+# output the binary string representation of input and return true, or output nothing and return false
 #
-function binary(){
-    local number="$1"
+function binary() {
+    local -l input=${1}
 
-    # convert hex to int
-    if [[ ${number} =~ ^((0[Xx]{1}[0-9a-fA-F]{0,32}|[0-9a-fA-F]{0,32})($)) ]]; then
-        if [[ ${number} =~ ^0[Xx] ]]; then
-            local number=$(($number))
-        else
-            local number=$((16#$number))
-        fi
+    # convert hex to base 10 int
+    if [ "${input:0:2}" == "0x" ]; then
+        local input=$((10#$input))
     fi
 
-    if [[ ${number} =~ ^[0-9]+$ ]]; then
-        local integer bit=""
-        printf -v integer '%d' "$number"
-        if [ $integer -eq 0 ]; then
+    # convert base 10 int to binary
+    if [[ ${input} =~ ^[0-9]+$ ]]; then
+        local uint bit=""
+        printf -v uint '%u' "$input"
+        if [ $uint -eq 0 ]; then
             local bit=0
         else
-            for ((; integer>0; integer>>=1)); do
-                local bit="$((integer&1))$bit"
+            for ((; uint>0; uint>>=1)); do
+                local bit="$((uint&1))$bit"
             done
         fi
 
@@ -62,79 +60,164 @@ function binary(){
 }
 
 #
-# output ipv4 compressed address (remove leading zeros, etc.)
+# input ipv4 address[/bits|mask] in binary, decimal, hexidecimal, octal, or uint
+# output ipv4 address that's been 'formatted' and return true, or output nothing and return false
+#
+# note: Some address validation is performed, but it's imperfect.  It is possible that certain outputs will be invalid addresses.
+function ipv4Address() {
+    local -l input=${1}
+
+    if [ ${#input} -le 0 ]; then
+        return 1 # input length invalid
+    fi
+
+    local -l output
+
+    local address bits
+
+    # get address from input
+    if [[ "$input" == *"/"* ]]; then
+        address=${input%%/*} # everything before /
+        bits=${input##*/} # everything after /
+    else
+        address=${input}
+    fi
+
+    if address=$(ipv4AddressCompress $address); then
+        if ! address=$(ipv4AddressExpand $address); then
+            return 1 # failed to expand
+        fi
+    else
+        return 1 # failed to compress
+    fi
+
+    if [ ${#bits} -gt 0 ]; then
+        if bits=$(ipv4Bits $bits); then
+            output="${address}/${bits}"
+        else
+            return 1
+        fi
+    else
+        output="${address}"
+    fi
+
+    if [[ ! "${ouput}" == *"/"* ]]; then
+        # ipv4 address without cidr bits
+        if [[ ${ouput} =~ ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$ ]]; then
+            printf "%s" "$output"
+            return 0
+        fi
+    else
+        # ipv4 address with cidr bits
+        if [[ ${ouput} =~ ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$ ]]; then
+            printf "%s" "$output"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+#
+# input ipv4 address[/bits|mask] in binary, decimal, hexidecimal, octal, or uint
+# output ipv4 address that's been 'compressed' and return true, or output nothing and return false
 #
 function ipv4AddressCompress() {
-    local address=$1
+    local -l input=$1
 
-    printf $address
+    if [ ${#input} -le 0 ]; then
+        return 1 # input length invalid
+    fi
+
+    local -l output
+
+    output=$input # preserve input
+    output=${output%%/*} # strip everything after /; (remove bits)
+
+    output=${output//:/} # strip all :
+    output=${output//0x/} # strip all 0x
+
+    # decimal
+    if [[ $output == *"."* ]]; then
+        if [ "${output//[^\.]}" == "..." ]; then
+            if [ ${#output} -lt 16 ]; then
+                if [[ ${output//\./} =~ ^[0-9]+$ ]]; then
+                    local octet octets
+                    for octet in ${output//\./\ }; do
+                        octets+=".$((10#$octet))"
+                    done
+                    output=${octets#.*} # remove leading .
+                    unset -v octet octets
+                else
+                    return 1 # invalid decimal
+                fi
+            fi
+        else
+            return 1 # too many dots
+        fi
+    fi
+
+    output=${output//[[:space:]]/} # strip all spaces
+
+    printf "%s" "$output"
 
     return 0
 }
 
 #
-# output ipv4 expanded address (add dots, etc.)
+# input ipv4 address[/bits|mask] in binary, decimal, hexidecimal, octal, or uint
+# output ipv4 that's been 'expanded' and return true, or output nothing and return false
 #
 function ipv4AddressExpand() {
-    local address=$1
-
-    printf $address
-
-    return 0
-}
-
-#
-# output ipv4 formatted address consistently (compress first, then expand)
-#
-function ipv4AddressFormat() {
     local -l input=$1
     local -l output
 
-    output=${input//[[:space:]]/} # strip all spaces
-
-    if [[ $output == *"."* ]]; then
-        # dot seperated
-
-        # convert all segments to base 10 (i.e. strip leading zeros)
-        if [[ ${output//\./} =~ ^[0-9]+$ ]] && [ ${#output} -le 15 ]; then
-            local octet octets
-            for octet in ${output//\./\ }; do
-                octets+=".$((10#$octet))"
-            done
-            output=${octets#.*} # remove leading .
-            unset -v octet octets
-        fi
-
-    else
-        # not dot seperated
-
-        # octal 16 characters; add dots
-        if [[ ${output} =~ ^[0-9]+$ ]] && [[ ${#output} -eq 16 ]]; then
-            output="${output:0:4}.${output:4:4}.${output:8:4}.${output:12:4}"
-        fi
-
-        # binary 32 characters; add dots
-        if [[ ${output} =~ ^[0-1]+$ ]] && [[ ${#output} -eq 32 ]]; then
-            output="${output:0:8}.${output:8:8}.${output:16:8}.${output:24:8}"
-        fi
-
-        # hex less than 8 chars; prefix with zeros
-        if [[ ${output} =~ ^([a-fA-F]+)$ ]] && [ $((${#output}%2)) -eq 0 ]; then
-            while [ ${#output} -lt 8 ]; do
-                output="0${output}"
-            done
-        fi
-
+    if [ ${#input} -le 0 ]; then
+        return 1
     fi
 
-    printf "%s" $output
+    output=$input
+
+    if [[ ! $output == *"."* ]]; then
+        # hexidecimal
+        if [ ${#output} -eq 8 ]; then
+            if [[ ${output} =~ ^([0-9a-fA-F]+)$ ]]; then
+                output="0x${output}"
+            else
+                return 1 # invalid hex address
+            fi
+        else
+            # octal
+            if [ ${#output} -eq 16 ]; then
+                if [[ ${output} =~ ^[0-9]+$ ]]; then
+                    output="${output:0:4}.${output:4:4}.${output:8:4}.${output:12:4}"
+                else
+                    return 1 # invalid octal address
+                fi
+            else
+                # binary
+                if [ ${#output} -eq 32 ]; then
+                    if [[ ${output} =~ ^[0-1]+$ ]]; then
+                        output="${output:0:8}.${output:8:8}.${output:16:8}.${output:24:8}"
+                    else
+                        return 1 # invalid binary address
+                    fi
+                fi
+            fi
+        fi
+    fi
+
+    printf "%s" "$output"
+    return 0
 }
 
 #
-# output ipv4 (cidr) bits or conversion of bits and return true or return false (if bits don't align & convert)
-# optionally, with $input=="chart", output (to stderr) a chart of all bit representations (that are valid & supported)
+# input ipv4 <subnet mask|bits> in binary, decimal, hexidecimal, octal, or uint
+# output ipv4 (cidr) bits or conversion of bits and return true, or output nothing and return
 #
-# i.e.
+# optionally, with $input=="chart", output a chart (to stderr) of all bit representations (that are valid & supported)
+#
+# note: i.e.
 # ipv4Bits 192.168.0.1 # false
 # ipv4Bits 255.255.248.0 # 21
 # ipv4Bits 21 decimal # 255.255.248.0
@@ -142,25 +225,23 @@ function ipv4AddressFormat() {
 # ipv4Bits chart 14 # displays all values of 14 bits
 #
 function ipv4Bits() {
-    local -l input=$1
+    local -l input=${1}
     local -l output=${2:0:3}
 
-    local address bits chart sep while_bits while_bits_match
+    local bits chart sep while_bits while_bits_match
 
-    # seperate input into address & bits
+    input=${input//[[:space:]]/}
+
+    # get bits from input
     if [[ "$input" == *"/"* ]]; then
-        address=${input%%/*} # everything before /
         bits=${input##*/} # everything after /
     else
         bits=$input
     fi
 
-    address=$(ipv4AddressFormat $address)
-    bits=$(ipv4AddressFormat $bits) # necessary?
-
     if [ "$bits" == "chart" ]; then
         chart=0 # true
-        printf -v sep -- "-%.0s" {1..109}
+        printf -v sep -- "-%.0s" {1..111}
         # only match bits given as $2
         if [[ $output =~ ^[0-9]+$ ]]; then
             if [ $output -ge 0 ] || [ $output -le $IPV4_MAX_BITS ]; then
@@ -171,17 +252,20 @@ function ipv4Bits() {
         chart=1 # false
         # if bits are given as $1 and $2 starts with one of the supported format names then output that representation
         if [[ $bits =~ ^[0-9]+$ ]]; then
-            if [ $bits -ge 0 ] || [ $bits -le $IPV4_MAX_BITS ]; then
+            if [ $((10#$bits)) -ge 0 ] && [ $((10#$bits)) -le $IPV4_MAX_BITS ]; then
                 if [ ${#output} -gt 0 ] && [ "${output}" != "bit" ]; then
-                    if [ "${output}" == "bin" ] || [ "${output}" == "dec" ] || [ "${output}" == "hex" ] || [ "${output}" == "uin" ] || [ "${output}" == "oct" ]; then
-                        while_bits_match=$bits
-                    else
-                        return 1 # unsupported output
-                    fi
+                    case ${output} in
+                        bin|dec|hex|uin|oct)
+                            while_bits_match=$bits
+                            ;;
+                        *)
+                            return 1 # unsupported output
+                            ;;
+                    esac
                 else
                     if [ "${output}" == "" ] || [ "${output}" == "bit" ]; then
-                        printf "%d" $bits
-                        return 0 # special case; valid simply return $bits (faster)
+                        printf "%u" $((10#$bits))
+                        return 0 # special case; valid return $bits (faster)
                     fi
                 fi
             fi
@@ -192,7 +276,7 @@ function ipv4Bits() {
     if [ $chart -eq 0 ]; then
         (>&2 printf "+%s+\n" "$sep")
         (>&2 printf "%-7s" "| bits")
-        (>&2 printf "%-36s" "| binary")
+        (>&2 printf "%-38s" "| binary")
         (>&2 printf "%-18s" "| decimal")
         (>&2 printf "%-14s" "| hexidecimal")
         (>&2 printf "%-13s" "| uint")
@@ -203,10 +287,8 @@ function ipv4Bits() {
 
     while_bits=$IPV4_MAX_BITS
 
-    # go backwards, it's faster
+    # go backwards, it's typically faster because most prefixes are /32 not /0, /1, etc.
     while [ $while_bits -ge 0 ]; do
-
-        #(>&2 echo "while_bits=$while_bits bits=$bits")
 
         if [ ${#while_bits_match} -gt 0 ]; then
             if [ ${while_bits_match} -ne ${while_bits} ]; then
@@ -217,95 +299,105 @@ function ipv4Bits() {
 
         if [ $chart -eq 0 ]; then
             (>&2 printf "%-7s" "| $while_bits")
+        else
+            if [ "${bits}" == "${while_bits}" ]; then
+                while_bits_match=0
+                #(>&2 echo "input=$input output=$output while_bits=$while_bits ($while_bits_match) bits=$bits")
+            fi
         fi
 
-        local binary
-        printf -v binary "%.$(($while_bits))s%.$((${IPV4_MAX_BITS}-$while_bits))s" "11111111111111111111111111111111" "00000000000000000000000000000000"
-        if [ $chart -eq 0 ]; then
-            (>&2 printf "%-36s" "| $binary")
-        else
-            if [ "${bits}" == "${binary}" ] || [ "${bits//\./}" == "${binary}" ]; then
-                printf "%d" $while_bits
-                return 0
+        if [ ${#while_bits_match} -eq 0 ] || [ ${while_bits_match} -ne 0 ] || [ ${#output} -ne 0 ]; then
+            local binary
+            printf -v binary "%.$((${while_bits}))s%.$((${IPV4_MAX_BITS}-${while_bits}))s" "11111111111111111111111111111111" "00000000000000000000000000000000"
+            binary="${binary:0:8}.${binary:8:8}.${binary:16:8}.${binary:24:8}" # add dots
+            # all conversions depend on the binary representation of $bits
+            if [ ${#binary} -ne 35 ]; then
+                return 1 # invalid binary conversion
+            fi
+            if [ $chart -eq 0 ]; then
+                (>&2 printf "%-38s" "| $binary")
             else
-                # all conversions depend on the binary representation of $bits
-                if [ ${#binary} -ne 32 ]; then
-                    return 1 # invalid binary conversion
-                fi
-
-                if [ "${output}" == "bin" ]; then
-                    printf "%s" $binary
-                    return 0
+                if [ "${bits//\./}" == "${binary//\./}" ]; then
+                    while_bits_match=0
                 fi
             fi
         fi
 
-        local decimal
-        printf -v decimal "%d.%d.%d.%d" $((2#${binary:0:8})) $((2#${binary:8:8})) $((2#${binary:16:8})) $((2#${binary:24:8}))
-        if [ $chart -eq 0 ]; then
-            (>&2 printf "%-18s" "| $decimal")
-        else
-            if [ "${bits}" == "${decimal}" ]; then
-                printf "%d" $while_bits
-                return 0
+        if [ ${#while_bits_match} -eq 0 ] || [ ${while_bits_match} -ne 0 ] || [ "${output}" == "dec" ]; then
+            local decimal
+            printf -v decimal "%d.%d.%d.%d" $((2#${binary:0:8})) $((2#${binary:9:8})) $((2#${binary:18:8})) $((2#${binary:27:8}))
+            if [ $chart -eq 0 ]; then
+                (>&2 printf "%-18s" "| $decimal")
             else
-                if [ "${output}" == "dec" ]; then
-                    printf "%s" $decimal
-                    return 0
+                if [ "${bits}" == "${decimal}" ]; then
+                    while_bits_match=0
                 fi
             fi
         fi
 
-        local hexidecimal
-        printf -v hexidecimal "%02x%02x%02x%02x" $((2#${binary:0:8})) $((2#${binary:8:8})) $((2#${binary:16:8})) $((2#${binary:24:8}))
-        if [ $chart -eq 0 ]; then
-            (>&2 printf "%-14s" "| $hexidecimal")
-        else
-            if [ "${bits}" == "${hexidecimal}" ] || [ "${bits}" == "0x${hexidecimal}" ]; then
-                printf "%d" $while_bits
-                return 0
+        if [ ${#while_bits_match} -eq 0 ] || [ ${while_bits_match} -ne 0 ] || [ "${output}" == "hex" ]; then
+            local hexidecimal
+            printf -v hexidecimal "0x%02x%02x%02x%02x" $((2#${binary:0:8})) $((2#${binary:9:8})) $((2#${binary:18:8})) $((2#${binary:27:8}))
+            if [ $chart -eq 0 ]; then
+                (>&2 printf "%-14s" "| $hexidecimal")
             else
-                if [ "${output}" == "hex" ]; then
-                    printf "%s" $hexidecimal
-                    return 0
+                if [ "${bits}" == "${hexidecimal}" ] || [ "${bits}" == "${hexidecimal:2:8}" ]; then
+                    while_bits_match=0
                 fi
             fi
         fi
 
-        local uint
-        printf -v uint "%u" 0x${hexidecimal}
-        if [ $chart -eq 0 ]; then
-            (>&2 printf "%-13s" "| $uint")
-        else
-            if [ "${bits}" == "${uint}" ]; then
-                printf "%d" $while_bits
-                return 0
+        if [ ${#while_bits_match} -eq 0 ] || [ ${while_bits_match} -ne 0 ] || [ "${output}" == "uin" ]; then
+            local uint
+            printf -v uint "%u" ${hexidecimal}
+            if [ $chart -eq 0 ]; then
+                (>&2 printf "%-13s" "| $uint")
             else
-                if [ "${output}" == "uin" ]; then
-                    printf "%s" $uint
-                    return 0
+                if [ "${bits}" == "${uint}" ]; then
+                    while_bits_match=0
                 fi
             fi
         fi
 
-        local octal
-        printf -v octal "%04o.%04o.%04o.%04o" $((2#${binary:0:8})) $((2#${binary:8:8})) $((2#${binary:16:8})) $((2#${binary:24:8}))
-        if [ $chart -eq 0 ]; then
-            (>&2 printf "%-22s" "| $octal")
-        else
-            if [ "${bits}" == "${octal}" ] || [ "${bits}" == "${octal//\./}" ]; then
-                printf "%d" $while_bits
-                return 0
+        if [ ${#while_bits_match} -eq 0 ] || [ ${while_bits_match} -ne 0 ] || [ "${output}" == "oct" ]; then
+            local octal
+            printf -v octal "%04o.%04o.%04o.%04o" $((2#${binary:0:8})) $((2#${binary:9:8})) $((2#${binary:18:8})) $((2#${binary:27:8}))
+            if [ $chart -eq 0 ]; then
+                (>&2 printf "%-22s" "| $octal")
             else
-                if [ "${output}" == "oct" ]; then
-                    printf "%s" $octal
-                    return 0
+                if [ "${bits//\./}" == "${octal//\./}" ]; then
+                    while_bits_match=0
                 fi
             fi
         fi
 
         if [ $chart -eq 0 ]; then
             (>&2 printf "|\n")
+        else
+
+            if [[ "$while_bits_match" =~ ^[0-9]+$ ]] && [ $while_bits_match -eq 0 ]; then
+                case ""$output in
+                    bin)
+                        printf "%s" $binary
+                        ;;
+                    dec)
+                        printf "%s" $decimal
+                        ;;
+                    hex)
+                        printf "%s" $hexidecimal
+                        ;;
+                    uin)
+                        printf "%s" $uint
+                        ;;
+                    oct)
+                        printf "%s" $octal
+                        ;;
+                    *)
+                        printf "%d" $while_bits
+                        ;;
+                esac
+                return 0
+            fi
         fi
 
         unset -v binary
@@ -320,567 +412,425 @@ function ipv4Bits() {
     fi
 }
 
-# check if two ipv4 addresses 'confict' with each other
+#
+# input two ipv4 address[/bits|mask] values
+# ouput nothing and return true if two address[/bits|mask] inputs 'confict' with each other, or false if they don't
+#
 function ipv4Conflict() {
-    local first=$1
-    local second=$2
+    local -l input1=$1
+    local -l input2=$2
 
-    # setup first
-    if [[ "$first" == *"/"* ]]; then
-        local address_first=${first%%/*} # everything before /
-        local bits_first=${first##*/} # everything after /
-    else
-        local address_first=$first
-        local bits_first=$IPV4_MAX_BITS
-    fi
+    local address1 address2 bits1 bits2 output
 
-    # validate address_first
-    local long_first=$(ipv42Long $address_first)
-    if [[ ! $long_first =~ ^[0-9]+$ ]]; then
-        return 1 # invalid positive integer
-    fi
-
-    # validate bits_first
-    if [[ ! $bits_first =~ ^[0-9]+$ ]]; then
-        return 1 # invalid positive integer
-    fi
-
-    local -i mask_first=$((-1<<($IPV4_MAX_BITS - $bits_first)))
-
-    local -i long_first=$(($long_first & $mask_first)) # bitwise and; in case the address wasn't correctly aligned
-
-    # setup second
-    if [[ "$second" == *"/"* ]]; then
-        local address_second=${second%%/*}
-        local bits_second=${second##*/}
-    else
-        local address_second=$second
-        local bits_second=$IPV4_MAX_BITS
-    fi
-
-    # validate bits_second
-    if [[ ! $bits_second =~ ^[0-9]+$ ]]; then
-        return 1 # invalid positive integer
-    else
-        if [ $bits_second -gt $IPV4_MAX_BITS ]; then
-            return 1 # invalid positive integer
+    # seperate input1 into address1 & bits1
+    if address1=$(ipv4ToUint ${input1}); then
+        if [[ "${address1}" == *"/"* ]]; then
+            bits1=${address1##*/} # everything after /
+            address1=${address1%%/*} # everything before /
+            if ! bits1=$(ipv4Bits ${bits1} bit); then
+                return 1 # invalid bits1
+            fi
+        else
+            bits1=${IPV4_MAX_BITS}
         fi
-    fi
-
-    # validate address_second
-    local long_second=$(ipv42Long $address_second)
-    if [[ ! $long_second =~ ^[0-9]+$ ]]; then
-        return 1 # invalid ip address
-    fi
-
-    local -i mask_second=$((-1<<($IPV4_MAX_BITS - $bits_second)))
-
-    local -i long_second=$(($long_second & $mask_second)) # bitwise and; in case the address wasn't correctly aligned
-
-    local -i confict_first=$(($long_first & $mask_second))
-    local -i confict_second=$(($long_second & $mask_first))
-
-    # debug to stderr
-    if [ "$Debug" == "function" ]; then
-        local debug_postfix
-        for debug_postfix in first second; do
-            (>&2 printf "%-30s = %s\n" "${debug_postfix}" "${!debug_postfix}")
-            local debug_prefix
-            for debug_prefix in address bits long mask confict; do
-                local debug_var=${debug_prefix}_${debug_postfix}
-                (>&2 printf "%-30s = %s\n" "${debug_var}" "${!debug_var}")
-                unset -v debug_var
-            done
-            unset -v debug_prefix
-            (>&2 printf "\n")
-        done
-        unset -v debug_postfix
-    fi
-
-    if [ $confict_first -eq $confict_second ]; then
-        return 0
     else
-        return 1
+        return 1 # invalid address1
     fi
 
+    local -i sint1=$((-1<<($IPV4_MAX_BITS - $bits1)))
+    local -i aligned1=$(($address1 & $sint1))
+
+    # seperate input2 into address2 & bits2
+    if address2=$(ipv4ToUint ${input2}); then
+        if [[ "${address2}" == *"/"* ]]; then
+            bits2=${address2##*/} # everything after /
+            address2=${address2%%/*} # everything before /
+            if ! bits2=$(ipv4Bits ${bits2} bit); then
+                return 1 # invalid bits2
+            fi
+        else
+            bits2=${IPV4_MAX_BITS}
+        fi
+    else
+        return 1 # invalid address2
+    fi
+
+    local -i sint2=$((-1<<($IPV4_MAX_BITS - $bits2)))
+    local -i aligned2=$(($address2 & $sint2))
+
+    local -i conflict1=$(($aligned1 & $sint2))
+    local -i conflict2=$(($aligned2 & $sint1))
+
+    #(>&2 echo "address1=$address1 aligned1=$aligned1 bits1=$bits1 sint1=$sint1 conflict1=$conflict1")
+    #(>&2 echo "address2=$address2 aligned2=$aligned2 bits2=$bits2 sint2=$sint2 conflict2=$conflict2")
+
+    if [ $conflict1 -eq $conflict2 ]; then
+        return 0 # the addresses conflict
+    else
+        return 1 # the addersses do not conflict
+    fi
 }
 
 #
-# output ipv4 mixed input to binary (bin) and return true, or output nothing and return false
+# input ipv4 address[/bits|mask] in binary, decimal, hexidecimal, octal, or uint
+# output ipv4 address[/bits|mask] in binary (bin) form and return true, or output nothing and return false
+#
+# note: This function first converts $input to ipv4ToHex $output and then uses printf to convert to the proper format.
 #
 function ipv4ToBin() {
-    local -l address=$1
+    local -l input=$1
+    local -l address bits output
 
-    local return=""
+    # seperate input into address & bits
+    if address=$(ipv4ToHex $input); then
+        if [[ "${address}" == *"/"* ]]; then
+            bits=${address##*/} # everything after /
+            address=${address%%/*} # everything before /
+            if ! bits=$(ipv4Bits ${bits} bin); then
+                return 1 # invalid bits
+            fi
+        fi
+    else
+        return 1 # invalid address
+    fi
 
-    # 00000001.00000010.00000011.00000100 # 1.2.3.0
+    printf -v output "%08d.%08d.%08d.%08d" $(binary $((16#${address:2:2}))) $(binary $((16#${address:4:2}))) $(binary $((16#${address:6:2}))) $(binary $((16#${address:8:2})))
 
-    printf "return=$return\n"
-    printf "address=$address\n"
+    if [ ${#bits} -gt 0 ]; then
+        output+="/${bits}"
+    fi
+
+    printf "%s" "$output"
+    return 0
 }
 
 #
-# output ipv4 mixed input to decimal (dec) and return true, or output nothing and return false
+# input ipv4 address[/bits|mask] in binary, decimal, hexidecimal, octal, or uint
+# output ipv4 address[/bits|mask] in binary (bin) form and return true, or output nothing and return false
 #
-function ipv4ToDec() {
-    local -l address=$1
+# note: This function converts the input to native binary() strings, rather than converting ipv4ToHex $output to binary with printf
+#       It's 33% slower, though I thought worth preserving. Ideally, all inputs would be converted to binary and from there
+#       mathed quickly to other outputs.  Too bad bash doesn't support base 2 via builtins.
+#
+function ipv4ToBinary() {
+    local -l input=$1
+    local -l address bits output
 
-    #
-    # validate input exists
-    #
+    # seperate input into address & bits
+    if address=$(ipv4Address $input); then
+        if [[ "${address}" == *"/"* ]]; then
+            bits=${address##*/} # everything after /
+            address=${address%%/*} # everything before /
+            if bits=$(ipv4Bits ${bits} bin); then
+                if ! bits=$(ipv4Address ${bits}); then
+                    return 1 # failed to address format bits
+                fi
+            else
+                return 1 # invalid bits
+            fi
+        fi
+    else
+        return 1 # invalid address
+    fi
 
-    if [ ${#address} -eq 0 ]; then
+    if [ ${#output} -eq 0 ]; then
+        if [[ ${address} == *"."* ]]; then
+            if [ "${address//[^\.]}" == "..." ]; then
+                local octet octets
+                for octet in ${address//\./ }; do
+                    #if [ ${#octet} -eq 8 ]; then
+                    if [[ ${octet} =~ ^[0-1]{8}$ ]]; then
+                        # binary octet
+                        octets+=".${octet}"
+                    else
+                        if [ ${#octet} -eq 4 ]; then
+                            # octal octet
+                            if [ $((8#$octet)) -ge 0 ] && [ $((8#$octet)) -le 255 ]; then
+                                printf -v octet "%08u" $(binary $((8#$octet)))
+                                octets+=".${octet}"
+                            else
+                                return 1 # invalid octal
+                            fi
+                        else
+                            # decimal octet
+                            if [ $((10#$octet)) -ge 0 ] && [ $((10#$octet)) -le 255 ]; then
+                                printf -v octet "%08u" $(binary $((10#$octet)))
+                                octets+=".${octet}"
+                            else
+                                return 1 # invalid decimal
+                            fi
+                        fi
+                    fi
+                done
+                output=${octets#.*}
+                unset -v octet octets
+            else
+                return 1 # too many dots
+            fi
+        fi
+    fi
+
+    if [ ${#output} -eq 0 ]; then
+        if [[ ${address} =~ ^0[Xx] ]]; then
+            if [ ${#address} -eq 10 ]; then
+                printf -v output "%08u.%08u.%08u.%08u" $(binary $((16#${address:2:2}))) $(binary $((16#${address:4:2}))) $(binary $((16#${address:6:2}))) $(binary $((16#${address:8:2})))
+            else
+                return 1 # invalid hex address (too long)
+            fi
+
+        fi
+    fi
+
+    if [ ${#output} -eq 0 ]; then
+        if [[ ${address} =~ ^[0-9]+$ ]]; then
+            if [ $((10#${address})) -ge 0 ] && [ $((10#${address})) -le ${IPV4_MAX_LONG} ]; then
+                printf -v output "%08u.%08u.%08u.%08u" $(binary $((address>>24&255))) $(binary $((address>>16&255))) $(binary $((address>>8&255))) $(binary $((address&255)))
+            else
+                return 1 # unknown address type; (uint out of range)
+            fi
+        fi
+    fi
+
+    if output=$(ipv4Address ${output}); then
+        if [ ${#bits} -gt 0 ]; then
+            output+="/${bits}"
+        fi
+        printf "%s" "$output"
+        return 0
+    else
+        # (>&2 echo "address=$address dec=$((16#${address:2:10}))")
         return 1
     fi
 
-    #
-    # validate decimal format
-    #
-
-    local decimal=1 # false
-    local decimal_address=$address
-
-    # validate ipv4 decimal address
-    if [[ $decimal_address =~ ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5]){1}(/|$) ]]; then
-        local decimal=0 # true
-        local decimal_bits="" # empty
-
-        if [[ "$decimal_address" == *"/"* ]]; then
-            # order is important; cut bits before address
-            local decimal_bits=${decimal_address##*/} # everything after /
-            local decimal_address=${decimal_address%%/*} # everything before /
-        fi
-
-        if [ ${#decimal_bits} -gt 0 ]; then
-            if [[ $decimal_bits =~ ^[0-9]+$ ]]; then
-                if [ $decimal_bits -ge 0 ] && [ $decimal_bits -le $IPV4_MAX_BITS ]; then
-                    # append the bits to the address
-                    local decimal_address+="/${decimal_bits}"
-                else
-                    # what comes after / is a positive integer, but has more or less bits in the cidr than is valid; bad address
-                    return 1
-                fi
-            else
-                # what comes after / is not a positive integer; bad address (maybe support hex?)
-                return 1
-            fi
-        fi
-    fi
-
-    if [ $decimal -eq 0 ]; then
-        printf "$decimal_address"
-        return 0
-    fi
-
-    # $address not in a valid decimal format
-
-    #
-    # validate binary format
-    #
-
-    local binary=1 # false
-    local binary_address=$address
-
-    if [[ $address =~ ^[0-1]{$IPV4_MAX_BITS}$ ]]; then
-        local binary_bits="" # empty
-
-        printf "binary $binary_address"
-
-        if [ $binary -eq 0 ]; then
-            printf "$binary_address"
-            return 0
-        fi
-
-        # TODO; complete
-        # 00000000000000000000000000000000
-    fi
-
-    # $address not in a valid binary format
-
-    #
-    # validate & convert hexidecimal format
-    #
-
-    local hexidecimal=1 # false
-    local hexidecimal_address=$address
-
-    if [[ ${hexidecimal_address} =~ ^((^0[Xx]{1}[0-9a-fA-F]{8}|[0-9a-fA-F]{8})(/|$)) ]]; then
-        local hexidecimal=0 # true
-        local hexidecimal_bits="" # empty
-
-        if [[ "$hexidecimal_address" == *"/"* ]]; then
-            # order is important; cut bits before address
-            local hexidecimal_bits=${hexidecimal_address##*/} # everything after /
-            local hexidecimal_address=${hexidecimal_address%%/*} # everything before /
-        fi
-
-        # these are unique to hexidecimal; support if the input is prefixed with 0x (strip first 2 characters)
-
-        if [[ ${hexidecimal_address} =~ ^0[Xx] ]]; then
-            local hexidecimal_address=$(($hexidecimal_address))
-            #local hexidecimal_address=${hexidecimal_address:2:${#hexidecimal_address}-2}
-        fi
-
-        local hexidecimal_address="0x${hexidecimal_address:0:2} 0x${hexidecimal_address:2:2} 0x${hexidecimal_address:4:2} 0x${hexidecimal_address:6:2}"
-        printf -v hexidecimal_address "%d.%d.%d.%d" $hexidecimal_address # convert address from hexidecimal to decimal
-
-        # re-validate decimal address?? shouldn't be necessary ...
-
-        if [[ ${hexidecimal_bits} =~ ^((^0[Xx]{1}[0-9a-fA-F]{8}|[0-9a-fA-F]{8})($)) ]]; then
-            # bits as hex
-
-            if [[ ${hexidecimal_bits} =~ ^0[Xx] ]]; then
-                local hexidecimal_address=$(($hexidecimal_address))
-                #local hexidecimal_bits=${hexidecimal_bits:2:${#hexidecimal_bits}-2}
-            fi
-
-            if hexidecimal_bits=$(ipv4Bits $hexidecimal_bits); then
-                local hexidecimal_address+="/${hexidecimal_bits}"
-            else
-                return 1 # invalid mask
-            fi
-
-        else
-            # bits as an integer?
-            if [[ $hexidecimal_bits =~ ^[0-9]+$ ]]; then
-                if [ $hexidecimal_bits -ge 0 ] && [ $hexidecimal_bits -le $IPV4_MAX_BITS ]; then
-                    # append the bit mask back to the address
-                    local hexidecimal_address+="/${hexidecimal_bits}"
-                else
-                    # what comes after / is a positive integer, but has more or less bits in the cidr than is valid; bad address
-                    return 1
-                fi
-            fi
-        fi
-
-    fi
-
-    if [ $hexidecimal -eq 0 ]; then
-        if [ ${#hexidecimal_address} -eq 0 ]; then
-            return 1 # invalid ipv4 hexidecimal address
-        fi
-    fi
-
-    if [ $hexidecimal -eq 0 ]; then
-        printf $hexidecimal_address
-        return 0
-    fi
-
-    printf "unknown $address"
-
-    return 1 # invalid ipv4 address
 }
 
 #
-# output ipv4 mixed input to hexidecimal (hex) and return true, or output nothing and return false
+# input ipv4 address[/bits|mask] in binary, decimal, hexidecimal, octal, or uint
+# output ipv4 address[/bits|mask] in decimal (dec) form and return true, or output nothing and return false
+#
+# note: This function first converts $input to ipv4ToHex $output and then uses printf to convert to the proper format.
+#       If [/bits|mask] is valid then it will output cidr bits *not* a decimal subnet mask.
+#
+function ipv4ToDec() {
+    local -l input=$1
+    local -l address bits output
+
+    # seperate input into address & bits
+    if address=$(ipv4ToHex $input); then
+        if [[ "${address}" == *"/"* ]]; then
+            bits=${address##*/} # everything after /
+            address=${address%%/*} # everything before /
+            if ! bits=$(ipv4Bits ${bits} bit); then
+                return 1 # invalid bits
+            fi
+        fi
+    else
+        return 1 # invalid address
+    fi
+
+    #printf -v output "%u.%u.%u.%u" $((2#${address:0:8})) $((2#${address:9:8})) $((2#${address:18:8})) $((2#${address:27:8})) # binary
+    printf -v output "%u.%u.%u.%u" $((16#${address:2:2})) $((16#${address:4:2})) $((16#${address:6:2})) $((16#${address:8:2})) # hex
+    if [ ${#bits} -gt 0 ]; then
+        output+="/${bits}"
+    fi
+
+    printf "%s" "$output"
+    return 0
+}
+
+#
+# input ipv4 address[/bits|mask] in binary, decimal, hexidecimal, octal, or uint
+# output ipv4 address[/bits|mask] in decimal (dec) form and return true, or output nothing and return false
+#
+# note: This function first converts $input to ipv4ToHex $output and then uses printf to convert to the proper format.
+#       If [/bits|mask] is valid then it will output a decimal subnet mask *not* cidr bits.
+#
+function ipv4ToDecMask() {
+    local -l input=$1
+    local -l address bits output
+
+    # seperate input into address & bits
+    if address=$(ipv4ToHex $input); then
+        if [[ "${address}" == *"/"* ]]; then
+            bits=${address##*/} # everything after /
+            address=${address%%/*} # everything before /
+            if ! bits=$(ipv4Bits ${bits} dec); then
+                return 1 # invalid bits
+            fi
+        fi
+    else
+        return 1 # invalid address
+    fi
+
+    #printf -v output "%u.%u.%u.%u" $((2#${address:0:8})) $((2#${address:9:8})) $((2#${address:18:8})) $((2#${address:27:8})) # binary
+    printf -v output "%u.%u.%u.%u" $((16#${address:2:2})) $((16#${address:4:2})) $((16#${address:6:2})) $((16#${address:8:2})) # hex
+    if [ ${#bits} -gt 0 ]; then
+        output+="/${bits}"
+    fi
+
+    printf "%s" "$output"
+    return 0
+}
+
+#
+# input ipv4 address[/bits|mask] in binary, decimal, hexidecimal, octal, or uint
+# output ipv4 address[/bits|mask] in hexidecimal (hex) form and return true, or output nothing and return false
+#
+# note: Many of the other functions herein depdend on this function.  It's more comprehensive, faster, and is easier to reduce to
+# hex & then convert to other formats via printf.
 #
 function ipv4ToHex() {
     local -l input=$1
-    local -l output
-
-    local address address_output address_valid bits bits_output bits_valid
+    local -l address bits output
 
     # seperate input into address & bits
-    address_valid=1 # false
-    if [[ "$input" == *"/"* ]]; then
-        address=${input%%/*} # everything before /
-        bits=${input##*/} # everything after /
-        bits_valid=1 # false
+    if address=$(ipv4Address $input); then
+        if [[ "${address}" == *"/"* ]]; then
+            bits=${address##*/} # everything after /
+            address=${address%%/*} # everything before /
+            if bits=$(ipv4Bits ${bits} hex); then
+                if ! bits=$(ipv4Address ${bits}); then
+                    return 1
+                fi
+            else
+                return 1
+            fi
+        fi
     else
-        address=$input
-        bits=""
-        bits_valid=0 # true
+        return 1
     fi
-
-    address=$(ipv4AddressFormat $address)
-    bits=$(ipv4AddressFormat $bits) # necessary?
-
-    #
-    # address
-    #
 
     if [ ${#address} -eq 0 ]; then
         return 1 # invalid; address length is 0
     else
         # convert ipv4 hex address
-        if [ $address_valid -eq 1 ]; then
+        if [ ${#output} -eq 0 ]; then
             if [[ ${address} =~ ^((^0[Xx]{1}[0-9a-fA-F]{8}|[0-9a-fA-F]{8})$) ]]; then
                 if [[ ${address} =~ ^0[Xx] ]]; then
-                    address_output=${address:2:${#address}-2}
+                    output=${address:2:${#address}-2}
                 else
-                    address_output=$address
+                    output=$address
                 fi
-                address_valid=0 # true
             fi
         fi
 
         # convert ipv4 decimal address
-        if [ $address_valid -eq 1 ]; then
+        if [ ${#output} -eq 0 ]; then
             if [[ $address =~ ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5]){1}$ ]]; then
-                printf -v address_output '%02x' ${address//\./\ }
+                printf -v output '%02x' ${address//\./\ }
 
-                address_valid=0 # true
             fi
         fi
 
-        # convert ipv4 long address
-        if [ $address_valid -eq 1 ]; then
+        # convert ipv4 uint address
+        if [ ${#output} -eq 0 ]; then
             if [[ $address =~ ^[0-9]+$ ]]; then
                 if [ $address -ge 0 ] && [ $address -le $IPV4_MAX_LONG ]; then
-                    printf -v address_output '%08x' $((10#$address))
-                    address_valid=0 # true
+                    printf -v output '%08x' $((10#$address))
                 fi
             fi
         fi
 
         # convert ipv4 binary address
-        if [ $address_valid -eq 1 ]; then
+        if [ ${#output} -eq 0 ]; then
             if [[ ${address//\./} =~ ^[0-1]+$ ]] && [[ ${#address} -eq 35 ]]; then
                 local octet octets
                 for octets in ${address//\./\ }; do
                     printf -v octet '%02x' $((2#${octets}))
-                    address_output+=$octet
+                    output+=$octet
                 done
                 unset -v octet octets
-                address_valid=0 # true
             fi
         fi
 
         # convert ipv4 octal address
-        if [ $address_valid -eq 1 ]; then
+        if [ ${#output} -eq 0 ]; then
             if [[ ${address//\./} =~ ^[0-9]+$ ]] && [[ ${#address} -eq 19 ]]; then
                 local octet octets
                 for octets in ${address//\./\ }; do
                     printf -v octet '%02x' $((8#${octets}))
-                    address_output+=$octet
+                    output+=$octet
                 done
                 unset -v octet octets
-                address_valid=0 # true
             fi
-        fi
-
-        # validate address_output
-        if [ $address_valid -eq 0 ] && [ ${#address_output} -eq 8 ]; then
-            output=$address_output
-            address_valid=0 # true
-        else
-            return 1 # invalid address; all regex or output failed
-        fi
-    fi
-
-    #
-    # bits
-    #
-
-    if [ ${#bits} -gt 0 ]; then
-
-        # convert ipv4 hexidecmal bits
-        if [ $bits_valid -eq 1 ]; then
-            if [[ ${bits} =~ ^((^0[Xx]{1}[0-9a-fA-F]{8}|[0-9a-fA-F]{8})$) ]]; then
-                if [[ ${bits} =~ ^0[Xx] ]]; then
-                    local bits_output=${bits:2:${#bits}-2}
-                else
-                    local bits_output=$bits
-                fi
-                bits_valid=0
-            fi
-        fi
-
-        # convert ipv4 decimal bits
-        if [ $bits_valid -eq 1 ]; then
-            # convert ipv4 decimal mask to bits
-            if [[ $bits =~ ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5]){1}$ ]]; then
-                # convert subnet mask to decimal bits
-                if ! bits=$(ipv4Bits $bits); then
-                    return 1 # invalid bits
-                fi
-            fi
-
-            if [[ $bits =~ ^[0-9]+$ ]]; then
-                if [ $bits -ge 0 ] && [ $bits -le $IPV4_MAX_BITS ]; then
-                    # convert decimal bits to binary
-                    local bit
-                    for ((bit=0; bit<$IPV4_MAX_BITS; bit+=1)); do
-                        if [ $bit -lt $bits ]; then
-                            bits_binary+="1"
-                        else
-                            bits_binary+="0"
-                        fi
-                    done
-                    unset -v bit
-
-                    # convert binary bits to hexidecimal
-                    printf -v bits_output "%08x" $((2#$bits_binary))
-                    bits_valid=0
-                fi
-            fi
-        fi
-
-        # convert ipv4 binary bits
-        if [ $bits_valid -eq 1 ]; then
-            if [[ ${bits//\./} =~ ^[0-1]+$ ]] && [[ ${#bits} -eq 35 ]]; then
-                local octet octets
-                for octets in ${bits//\./\ }; do
-                    printf -v octet '%02x' $((2#${octets}))
-                    bits_output+=$octet
-                done
-                unset -v octet octets
-                bits_valid=0 # true
-            fi
-        fi
-
-        # convert ipv4 octal bits
-        if [ $bits_valid -eq 1 ]; then
-            if [[ ${bits//\./} =~ ^[0-9]+$ ]] && [[ ${#bits} -eq 19 ]]; then
-                local octet octets
-                for octets in ${bits//\./\ }; do
-                    printf -v octet '%02x' $((8#${octets}))
-                    bits_output+=$octet
-                done
-                unset -v octet octets
-                bits_valid=0 # true
-            fi
-        fi
-
-        # convert ipv4 long bits (caveat; if it's an integer from 0-32 then it will *not* match here
-        if [ $bits_valid -eq 1 ]; then
-            if [[ $bits =~ ^[0-9]+$ ]]; then
-                if [ $bits -gt $IPV4_MAX_BITS ] && [ $bits -le $IPV4_MAX_LONG ]; then
-                    printf -v bits_output '%08x' $((10#$bits))
-                    bits_valid=0 # true
-                fi
-            fi
-        fi
-
-        # validate bits_output
-        if [ $bits_valid -eq 0 ] && [ ${#bits_output} -eq 8 ]; then
-
-            local bits_check=0 octal_mask
-            printf -v octal_mask '%o' 0x${bits_output}
-            octal_mask=0${octal_mask} # octal must have leading zero
-
-            while [ $octal_mask -gt 0 ]; do
-                # calculate octal_mask modulo 2 & right shift 1 position; add the result to decimal bits
-                let local bits_check+=$((octal_mask%2)) 'octal_mask>>=1'
-            done
-
-
-            if [ $bits_check -ge 0 ] && [ $bits_check -le $IPV4_MAX_BITS ]; then
-                local bits_valid=0 # valid bits
-            else
-                local bits_valid=1 # valid bits
-            fi
-
-            # append valid bits to output
-            output+="/${bits_output}"
-        else
-            return 1 # invalid bits
         fi
 
     fi
 
-
-    # out valid address[/bits] and return 0
-    if [ $address_valid -eq 0 ] && [ $bits_valid -eq 0 ]; then
-        printf $output
+    # output valid address[/bits] and return 0
+    if [ ${#output} -eq 8 ]; then
+        if [ ${#bits} -gt 0 ]; then
+            output+="/${bits}"
+        fi
+        printf "0x%s" $output
         return 0
+    else
+        # invalid address, return 1
+        return 1
+    fi
+}
+
+#
+# input ipv4 address[/bits|mask] in binary, decimal, hexidecimal, octal, or uint
+# output ipv4 address[/bits|mask] in octal (oct) form and return true, or output nothing and return false
+#
+# note: This function first converts $input to ipv4ToHex $output and then uses printf to convert to the proper format.
+#
+function ipv4ToOct() {
+    local -l input=$1
+    local -l address bits output
+
+    # seperate input into address & bits
+    if address=$(ipv4ToHex $input); then
+        if [[ "${address}" == *"/"* ]]; then
+            bits=${address##*/} # everything after /
+            address=${address%%/*} # everything before /
+            if ! bits=$(ipv4Bits ${bits} oct); then
+                return 1 # invalid bits
+            fi
+        fi
+    else
+        return 1 # invalid address
     fi
 
-    # invalid address, return 1
-    return 1
-}
-
-#
-# output ipv4 mixed input to unsigned integer (uin) and return true, or output nothing and return false
-#
-function ipv4Uint() {
-    local address=$1
-    local return=""
-
-    printf "return=$return\n"
-    printf "address=$address\n"
-}
-
-#
-# output ipv4 mixed input to octal (oct) and return true, or output nothing and return false
-#
-function ipv4Oct() {
-    local address=$1
-    local return=""
-
-    # 0377.0377.0001.0001 # 255.255.1.1
-
-    printf "return=$return\n"
-    printf "address=$address\n"
-}
-
-#
-# old
-#
-
-function ipv42Long() {
-    local address=$1
-
-    if ! ipv4Valid $address; then
-        return 1 # invalid ip address
+    #printf -v output "%u.%u.%u.%u" $((2#${address:0:8})) $((2#${address:9:8})) $((2#${address:18:8})) $((2#${address:27:8})) # binary
+    printf -v output "%04o.%04o.%04o.%04o" $((16#${address:2:2})) $((16#${address:4:2})) $((16#${address:6:2})) $((16#${address:8:2})) # hex
+    if [ ${#bits} -gt 0 ]; then
+        output+="/${bits}"
     fi
 
-    local -i a b c d
-
-    read a b c d <<< "${address//\./ }"
-
-    a=$((a<<24))
-    b=$((b<<16))
-    c=$((c<<8))
-    d=$((d<<0))
-
-    printf '%d' "$((a+b+c+d))"
-
-    unset -v a b c d
-
+    printf "%s" "$output"
     return 0
 }
 
-function ipv4Long2() {
-    local address=$1
+#
+# input ipv4 address[/bits|mask] in binary, decimal, hexidecimal, octal, or uint
+# output ipv4 address[/bits|mask] in unsigned integer (uin) form and return true, or output nothing and return false
+#
+# note: This function first converts $input to ipv4ToHex $output and then uses printf to convert to the proper format.
+#
+function ipv4ToUint() {
+    local -l input=$1
+    local -l address bits output
 
-    local -i long_max=4294967295 # the largest long value for ipv4 address
-
-    if [[ ! $address =~ ^[0-9]+$ ]]; then
-        return 1 # invalid positive integer
-    else
-        if [ $address -gt $long_max ]; then
-            return 1 # invalid long address
+    # seperate input into address & bits
+    if address=$(ipv4ToHex $input); then
+        if [[ "${address}" == *"/"* ]]; then
+            bits=${address##*/} # everything after /
+            address=${address%%/*} # everything before /
+            if ! bits=$(ipv4Bits ${bits} uin); then
+                return 1 # invalid bits
+            fi
         fi
+    else
+        return 1 # invalid address
     fi
 
-    local -i a=$((address>>24&255))
-    local -i b=$((address>>16&255))
-    local -i c=$((address>>8&255))
-    local -i d=$((address&255))
+    printf -v output "%u" ${address}
+    if [ ${#bits} -gt 0 ]; then
+        output+="/${bits}"
+    fi
 
-    printf '%d.%d.%d.%d' $a $b $c $d
-
+    printf "%s" "$output"
     return 0
-}
-
-# validate an ipv4 (decimal) address with or without cidr notation
-function ipv4Valid() {
-    local address=$1
-
-    if [[ "$address" == *"/"* ]]; then
-
-        if [[ $address =~ ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$ ]]; then
-            return 0 # valid ipv4 address and cidr notation
-        fi
-
-    else
-
-        if [[ $address =~ ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$ ]]; then
-            return 0 # valid ipv4 address
-        fi
-
-    fi
-
-    return 1 # invalid ipv4 address
 }
