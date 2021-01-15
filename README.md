@@ -1,4 +1,4 @@
-# Linux Adaptive Blacklist [labl]
+# IP.bash
 
 ### Purpose
 
